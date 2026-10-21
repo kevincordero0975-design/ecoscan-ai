@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EcoScan IA - Clasificador de Residuos</title>
+    <!-- Tailwind CSS para un diseño limpio y moderno -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- TensorFlow.js y MobileNet para el reconocimiento de objetos local -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
+    <style>
+        #video { transform: scaleX(-1); } /* Efecto espejo para la cámara frontal opcional, remover si confunde */
+    </style>
+</head>
+<body class="bg-gray-100 font-sans min-h-screen flex flex-col justify-between">
+
+    <!-- Encabezado -->
+    <header class="bg-emerald-600 text-white text-center py-4 shadow-md">
+        <h1 class="text-2xl font-bold tracking-wide">♻️ EcoScan IA</h1>
+        <p class="text-xs opacity-90 mt-1">Escanea tus residuos y descubre dónde reciclarlos</p>
+    </header>
+
+    <!-- Contenido Principal -->
+    <main class="flex-1 flex flex-col items-center justify-center p-4 max-w-md mx-auto w-full space-y-4">
+        
+        <!-- Contenedor de la Cámara -->
+        <div class="relative w-full aspect-square bg-black rounded-2xl overflow-hidden shadow-lg border-4 border-white">
+            <video id="video" autoplay playsinline muted class="w-full h-full object-cover"></video>
+            
+            <!-- Estado de carga / Mensajes de la IA -->
+            <div id="loadingOverlay" class="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white p-4 text-center transition-opacity duration-300">
+                <div class="animate-spin rounded-full h-12 w-12 border-4 border-emerald-500 border-t-transparent mb-4"></div>
+                <p id="statusText" class="font-medium">Cargando modelo de Inteligencia Artificial...</p>
+            </div>
+
+            <!-- Canvas oculto para capturar frames si es necesario en procesamiento extendido -->
+            <canvas id="canvas" class="hidden"></canvas>
+        </div>
+
+        <!-- Resultados e Indicaciones del Contenedor -->
+        <div class="w-full bg-white rounded-2xl p-5 shadow-md text-center space-y-3">
+            <div>
+                <span class="text-xs font-bold uppercase tracking-wider text-gray-400">Objeto Detectado</span>
+                <h2 id="detectedObject" class="text-xl font-bold text-gray-800 mt-1">Esperando cámara...</h2>
+            </div>
+
+            <!-- Tarjeta Dinámica del Contenedor de Destino -->
+            <div id="binIndicator" class="p-4 rounded-xl bg-gray-100 border border-gray-200 transition-all duration-300">
+                <span id="binEmoji" class="text-4xl block mb-2">🔍</span>
+                <h3 id="binName" class="text-lg font-bold text-gray-700">Apunta a un residuo</h3>
+                <p id="binInstructions" class="text-sm text-gray-500 mt-1">Coloca el objeto frente a la cámara para analizarlo en tiempo real.</p>
+            </div>
+        </div>
+
+        <!-- Botones de Control -->
+        <div class="w-full flex justify-center">
+            <button id="switchCameraBtn" class="bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-6 py-3 rounded-xl shadow-md flex items-center space-x-2 transition-colors duration-200 w-full justify-center">
+                <span>🔄 Cambiar Cámara</span>
+            </button>
+        </div>
+    </main>
+
+    <!-- Pie de página -->
+    <footer class="text-center py-3 text-xs text-gray-400 bg-white border-t border-gray-200">
+        EcoScan IA © 2026 • Procesamiento 100% Local y Privado
+    </footer>
+
+    <!-- Lógica de la Aplicación -->
+    <script>
+        const video = document.getElementById('video');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const statusText = document.getElementById('statusText');
+        const detectedObjectText = document.getElementById('detectedObject');
+        const binIndicator = document.getElementById('binIndicator');
+        const binEmoji = document.getElementById('binEmoji');
+        const binName = document.getElementById('binName');
+        const binInstructions = document.getElementById('binInstructions');
+        const switchCameraBtn = document.getElementById('switchCameraBtn');
+
+        let model = null;
+        let currentStream = null;
+        let useFacingMode = 'environment'; // Por defecto usa la cámara trasera en celulares
+
+        // Diccionario de traducción y asignación de contenedores estándar
+        const wasteClassifier = {
+            // ORGANIZACIÓN POR PALABRAS CLAVE EN INGLÉS (Salida de MobileNet)
+            
+            // 🟡 CONTENEDOR AMARILLO: Envases de plástico, latas, briks
+            yellow: {
+                name: 'Contenedor Amarillo',
+                emoji: '🟡',
+                bgColor: 'bg-yellow-50',
+                borderColor: 'border-yellow-400',
+                textColor: 'text-yellow-800',
+                instructions: 'Latas de refresco, botellas de plástico, envases de yogur, bolsas de plástico y briks de leche.',
+                keywords: ['bottle', 'can', 'plastic', 'container', 'tub', 'packaging', 'flask', 'beaker']
+            },
+            // 🔵 CONTENEDOR AZUL: Papel y cartón
+            blue: {
+                name: 'Contenedor Azul',
+                emoji: '🔵',
+                bgColor: 'bg-blue-50',
+                borderColor: 'border-blue-400',
+                textColor: 'text-blue-800',
+                instructions: 'Cajas de cartón, periódicos, revistas, hojas de papel, folletos comerciales y bolsas de papel.',
+                keywords: ['paper', 'cardboard', 'carton', 'envelope', 'book', 'notebook', 'magazine', 'packet']
+            },
+            // 🟢 CONTENEDOR VERDE: Vidrio (sin tapas de metal o plástico)
+            green: {
+                name: 'Contenedor Verde',
+                emoji: '🟢',
+                bgColor: 'bg-emerald-50',
+                borderColor: 'border-emerald-400',
+                textColor: 'text-emerald-800',
+                instructions: 'Botellas de vidrio, frascos de conserva y tarros de cosméticos. Recuerda quitar los tapones.',
+                keywords: ['glass', 'wine bottle', 'beer bottle', 'jar', 'goblet', 'vial']
+            },
+            // 🟤 CONTENEDOR ORGÁNICO / MARRÓN: Restos de comida y desechos naturales
+            brown: {
+                name: 'Contenedor Orgánico',
+                emoji: '🟤',
+                bgColor: 'bg-amber-900/10',
+                borderColor: 'border-amber-600',
+                textColor: 'text-amber-900',
+                instructions: 'Restos de fruta, verdura, carne, pescado, cáscaras de huevo, posos de café y servilletas sucias.',
+                keywords: ['banana', 'apple', 'orange', 'food', 'bread', 'meat', 'vegetable', 'fruit', 'cabbage', 'broccoli']
+            },
+            // ⚫ CONTENEDOR GRIS / RESTO: Todo lo que no se recicla ni sirve para compost
+            gray: {
+                name: 'Contenedor Gris (Resto)',
+                emoji: '⚫',
+                bgColor: 'bg-gray-100',
+                borderColor: 'border-gray-400',
+                textColor: 'text-gray-800',
+                instructions: 'Pañales, colillas, chicles, polvo de barrer, vajilla rota u objetos cotidianos que no van al punto limpio.',
+                keywords: ['cup', 'mug', 'plate', 'spoon', 'fork', 'knife', 'pen', 'pencil', 'mouse', 'keyboard', 'shoe', 'clothing']
+            }
+        };
+
+        // Inicializar la aplicación cargando el modelo de visión artificial
+        async function initApp() {
+            try {
+                statusText.innerText = "Descargando modelo MobileNet v2...";
+                model = await mobilenet.load({version: 2, alpha: 1.0});
+                
+                statusText.innerText = "Accediendo a la cámara...";
+                await startCamera();
+                
+                loadingOverlay.classList.add('opacity-0');
+                setTimeout(() => loadingOverlay.classList.add('hidden'), 300);
+                
+                // Iniciar bucle de detección continua
+                detectFrame();
+            } catch (error) {
+                console.error(error);
+                statusText.innerHTML = `❌ Error de inicialización:<br><span class="text-xs text-red-300 mt-2 block">${error.message}</span>`;
+            }
+        }
+
+        // Configurar y encender el flujo de la cámara
+        async function startCamera() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            const constraints = {
+                video: {
+                    facingMode: useFacingMode,
+                    width: { ideal: 640 },
+                    height: { ideal: 640 }
+                },
+                audio: false
+            };
+
+            currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = currentStream;
+            
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    resolve();
+                };
+            });
+        }
+
+        // Bucle de clasificación frame a frame
+        async function detectFrame() {
+            if (model && video.readyState === video.HAVE_ENOUGH_DATA) {
+                // Predecir los objetos presentes en la imagen actual del video
+                const predictions = await model.classify(video);
+                
+                if (predictions && predictions.length > 0) {
+                    // Tomar la predicción con mayor porcentaje de acierto (confianza)
+                    const topPrediction = predictions[0];
+                    const className = topPrediction.className.toLowerCase();
+                    const confidence = Math.round(topPrediction.probability * 100);
+
+                    // Solo actuar si la confianza supera un umbral mínimo (ej. 15%)
+                    if (confidence > 15) {
+                        detectedObjectText.innerText = `${topPrediction.className} (${confidence}%)`;
+                        classifyWaste(className);
+                    }
+                }
+            }
+            // Solicitar el siguiente frame de animación de forma optimizada
+            requestAnimationFrame(detectFrame);
+        }
+
+        // Mapear el nombre del objeto detectado con su contenedor correspondiente
+        function classifyWaste(objectName) {
+            let matchedBin = wasteClassifier.gray; // Por defecto va a Resto si no coincide con nada específico
+            
+            // Recorrer los contenedores buscando coincidencias en las palabras clave
+            for (const key in wasteClassifier) {
+                const bin = wasteClassifier[key];
+                const found = bin.keywords.some(keyword => objectName.includes(keyword));
+                if (found) {
+                    matchedBin = bin;
+                    break;
+                }
+            }
+
+            // Actualizar la interfaz visual dinámicamente con los estilos del contenedor
+            binIndicator.className = `p-4 rounded-xl border transition-all duration-300 ${matchedBin.bgColor} ${matchedBin.borderColor} ${matchedBin.textColor}`;
+            binEmoji.innerText = matchedBin.emoji;
+            binName.innerText = matchedBin.name;
+            binInstructions.innerText = matchedBin.instructions;
+        }
+
+        // Evento para alternar entre cámara frontal y trasera
+        switchCameraBtn.addEventListener('click', async () => {
+            useFacingMode = (useFacingMode === 'environment') ? 'user' : 'environment';
+            // Cambiar propiedad visual del espejo dependiendo de la cámara activa
+            video.style.transform = (useFacingMode === 'user') ? 'scaleX(-1)' : 'none';
+            
+            loadingOverlay.classList.remove('hidden', 'opacity-0');
+            statusText.innerText = "Cambiando cámara...";
+            
+            try {
+                await startCamera();
+                loadingOverlay.classList.add('opacity-0');
+                setTimeout(() => loadingOverlay.classList.add('hidden'), 300);
+            } catch (e) {
+                console.error(e);
+                alert("No se pudo acceder a la cámara seleccionada.");
+            }
+        });
+
+        // Ejecutar al cargar completamente el DOM
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
+</body>
+</html>
